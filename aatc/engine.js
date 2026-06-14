@@ -1,0 +1,370 @@
+// ==================== CONFIG ====================
+const MODELS = {
+    gemini: [
+        { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash' },
+        { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Stable)' },
+        { id: 'gemini-2.0-pro-exp', name: 'Gemini 2.0 Pro' },
+        { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+        { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' }
+    ],
+    groq: [
+        { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B' },
+        { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B' },
+        { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B' },
+        { id: 'gemma2-9b-it', name: 'Gemma 2 9B' },
+        { id: 'deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 (Llama 70B)' }
+    ]
+};
+
+// ==================== STATE ====================
+let currentProvider = '';
+let currentModel = '';
+let isStreaming = false;
+let abortController = null;
+
+// ==================== DOM ELEMENTS ====================
+const providerSelect = document.getElementById('providerSelect');
+const modelSelect = document.getElementById('modelSelect');
+const chatContainer = document.getElementById('chatContainer');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const settingsModal = document.getElementById('settingsModal');
+
+// ==================== INIT ====================
+function init() {
+    // Load saved keys
+    const geminiKey = localStorage.getItem('gemini_api_key');
+    const groqKey = localStorage.getItem('groq_api_key');
+    if (geminiKey) document.getElementById('geminiKey').value = geminiKey;
+    if (groqKey) document.getElementById('groqKey').value = groqKey;
+
+    // Load last used provider/model
+    const savedProvider = localStorage.getItem('last_provider');
+    const savedModel = localStorage.getItem('last_model');
+    if (savedProvider) {
+        providerSelect.value = savedProvider;
+        updateModelDropdown(savedProvider);
+        if (savedModel) {
+            setTimeout(() => { modelSelect.value = savedModel; }, 0);
+        }
+    }
+
+    // Event listeners
+    providerSelect.addEventListener('change', (e) => {
+        const provider = e.target.value;
+        updateModelDropdown(provider);
+        currentProvider = provider;
+        localStorage.setItem('last_provider', provider);
+    });
+
+    modelSelect.addEventListener('change', (e) => {
+        currentModel = e.target.value;
+        localStorage.setItem('last_model', currentModel);
+    });
+
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    messageInput.addEventListener('input', autoResize);
+}
+
+function updateModelDropdown(provider) {
+    modelSelect.innerHTML = '<option value="">Select Model</option>';
+    modelSelect.disabled = !provider;
+
+    if (!provider || !MODELS[provider]) return;
+
+    MODELS[provider].forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        modelSelect.appendChild(option);
+    });
+}
+
+function autoResize() {
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+}
+
+// ==================== SETTINGS MODAL ====================
+function openSettings() {
+    settingsModal.classList.add('active');
+}
+
+function closeSettings() {
+    settingsModal.classList.remove('active');
+}
+
+function saveKeys() {
+    const geminiKey = document.getElementById('geminiKey').value.trim();
+    const groqKey = document.getElementById('groqKey').value.trim();
+
+    if (geminiKey) localStorage.setItem('gemini_api_key', geminiKey);
+    else localStorage.removeItem('gemini_api_key');
+
+    if (groqKey) localStorage.setItem('groq_api_key', groqKey);
+    else localStorage.removeItem('groq_api_key');
+
+    closeSettings();
+}
+
+// Close modal on overlay click
+settingsModal.addEventListener('click', (e) => {
+    if (e.target === settingsModal) closeSettings();
+});
+
+// ==================== CHAT ====================
+function addMessage(role, content) {
+    const emptyState = chatContainer.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `message ${role}`;
+
+    if (role === 'assistant') {
+        msgDiv.innerHTML = renderMarkdown(content);
+    } else {
+        msgDiv.textContent = content;
+    }
+
+    chatContainer.appendChild(msgDiv);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+    return msgDiv;
+}
+
+function updateMessage(element, content) {
+    element.innerHTML = renderMarkdown(content);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function renderMarkdown(text) {
+    // Escape HTML
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Code blocks
+    text = text.replace(/```(\w+)?
+([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Bold & Italic
+    text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Headers
+    text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Lists
+    text = text.replace(/^\* (.+)$/gm, '<li>$1</li>');
+    text = text.replace(/(<li>.*<\/li>
+?)+/g, '<ul>$&</ul>');
+
+    // Line breaks
+    text = text.replace(/
+/g, '<br>');
+
+    return text;
+}
+
+function showTyping() {
+    const emptyState = chatContainer.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'message assistant typing-indicator';
+    typingDiv.id = 'typingIndicator';
+    typingDiv.innerHTML = '<span></span><span></span><span></span>';
+    chatContainer.appendChild(typingDiv);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function hideTyping() {
+    const typing = document.getElementById('typingIndicator');
+    if (typing) typing.remove();
+}
+
+async function sendMessage() {
+    const message = messageInput.value.trim();
+    if (!message || isStreaming) return;
+
+    // Validate setup
+    currentProvider = providerSelect.value;
+    currentModel = modelSelect.value;
+
+    if (!currentProvider) {
+        alert('Please select a provider first!');
+        return;
+    }
+    if (!currentModel) {
+        alert('Please select a model first!');
+        return;
+    }
+
+    const apiKey = localStorage.getItem(currentProvider + '_api_key');
+    if (!apiKey) {
+        alert('Please add your ' + currentProvider.toUpperCase() + ' API key in settings!');
+        openSettings();
+        return;
+    }
+
+    // Add user message
+    addMessage('user', message);
+    messageInput.value = '';
+    messageInput.style.height = 'auto';
+
+    // Show typing
+    showTyping();
+    isStreaming = true;
+    sendBtn.disabled = true;
+
+    // Create assistant message placeholder
+    const assistantMsg = document.createElement('div');
+    assistantMsg.className = 'message assistant';
+    assistantMsg.innerHTML = '';
+
+    abortController = new AbortController();
+
+    try {
+        if (currentProvider === 'gemini') {
+            await streamGemini(message, apiKey, assistantMsg);
+        } else if (currentProvider === 'groq') {
+            await streamGroq(message, apiKey, assistantMsg);
+        }
+    } catch (error) {
+        hideTyping();
+        if (error.name !== 'AbortError') {
+            addMessage('assistant', '❌ Error: ' + error.message);
+        }
+    } finally {
+        isStreaming = false;
+        sendBtn.disabled = false;
+        abortController = null;
+    }
+}
+
+// ==================== GEMINI STREAMING ====================
+async function streamGemini(message, apiKey, assistantMsg) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: message }] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
+        }),
+        signal: abortController.signal
+    });
+
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error?.message || `HTTP ${response.status}`);
+    }
+
+    hideTyping();
+    chatContainer.appendChild(assistantMsg);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') continue;
+
+                try {
+                    const parsed = JSON.parse(data);
+                    const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                    if (text) {
+                        fullText += text;
+                        updateMessage(assistantMsg, fullText);
+                    }
+                } catch (e) {
+                    // Ignore parse errors for SSE boundaries
+                }
+            }
+        }
+    }
+}
+
+// ==================== GROQ STREAMING ====================
+async function streamGroq(message, apiKey, assistantMsg) {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: currentModel,
+            messages: [{ role: 'user', content: message }],
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true
+        }),
+        signal: abortController.signal
+    });
+
+    if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.error?.message || `HTTP ${response.status}`);
+    }
+
+    hideTyping();
+    chatContainer.appendChild(assistantMsg);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') continue;
+
+                try {
+                    const parsed = JSON.parse(data);
+                    const text = parsed.choices?.[0]?.delta?.content || '';
+                    if (text) {
+                        fullText += text;
+                        updateMessage(assistantMsg, fullText);
+                    }
+                } catch (e) {
+                    // Ignore parse errors
+                }
+            }
+        }
+    }
+}
+
+// ==================== CANCEL ====================
+function cancelStream() {
+    if (abortController) {
+        abortController.abort();
+    }
+}
+
+// ==================== START ====================
+init();
